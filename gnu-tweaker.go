@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -60,7 +62,7 @@ func detectDistro() DistroInfo {
 	return info
 }
 
-// --- Настройки и состояние ---
+// --- Настройки, состояние и логи ---
 
 type state struct {
 	Selected map[string]bool `json:"selected"`
@@ -72,6 +74,14 @@ func statePath() string {
 		dir = os.TempDir()
 	}
 	return filepath.Join(dir, "gnu-tweaker", "state.json")
+}
+
+func logPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "gnu-tweaker-last-run.log")
+	}
+	return filepath.Join(home, ".local", "state", "gnu-tweaker", "last-run.log")
 }
 
 func loadState() state {
@@ -162,6 +172,26 @@ func buildTweaks(distro DistroInfo, saved state) []tweak {
 
 	binPath := currentBinaryPath()
 	installTarget := "/usr/bin/gnu-tweaker"
+
+	// Скрипт добавления nvidia-drm.modeset=1 в GRUB или systemd-boot
+	nvidiaDrmScript := `
+if [ -f /etc/default/grub ]; then
+	if ! grep -q "nvidia-drm.modeset=1" /etc/default/grub; then
+		sed -i 's/\(^GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 nvidia-drm.modeset=1"/' /etc/default/grub
+	fi
+	if command -v update-grub >/dev/null 2>&1; then
+		update-grub
+	elif command -v grub-mkconfig >/dev/null 2>&1; then
+		grub-mkconfig -o /boot/grub/grub.cfg
+	fi
+elif [ -d /boot/loader/entries ]; then
+	for f in /boot/loader/entries/*.conf; do
+		[ -f "$f" ] && ! grep -q "nvidia-drm.modeset=1" "$f" && sed -i '/^options / s/$/ nvidia-drm.modeset=1/' "$f"
+	done
+else
+	echo "Не найден GRUB или systemd-boot. Добавьте nvidia-drm.modeset=1 вручную."
+	exit 1
+fi`
 
 	rawTweaks := []tweak{
 		// ==================== ПАКЕТЫ (ARCH) ====================
@@ -342,6 +372,18 @@ func buildTweaks(distro DistroInfo, saved state) []tweak {
 			commands: [][]string{
 				{"sudo", "sed", "-i", `/^#\[multilib\]/,+1 s/^#//`, "/etc/pacman.conf"},
 				{"sudo", "pacman", "-Sy", "--needed", "linux-headers", "nvidia-dkms", "nvidia-utils", "lib32-nvidia-utils", "nvidia-settings", "--noconfirm"},
+			},
+		},
+		{
+			id:          "sys-nvidia-drm",
+			category:    "system",
+			title:       "Включить NVIDIA DRM Modeset (nvidia-drm.modeset=1)",
+			description: "Добавляет nvidia-drm.modeset=1 в параметры ядра (GRUB или systemd-boot) для Wayland и без тиринга.",
+			distros:     []string{"all"},
+			selected:    pick("sys-nvidia-drm", false),
+			checkCmd:    []string{"bash", "-c", `grep -q "nvidia-drm.modeset=1" /etc/default/grub /boot/loader/entries/*.conf 2>/dev/null || grep -qx "Y" /sys/module/nvidia_drm/parameters/modeset 2>/dev/null`},
+			commands: [][]string{
+				{"sudo", "bash", "-c", strings.TrimSpace(nvidiaDrmScript)},
 			},
 		},
 		{
@@ -550,6 +592,12 @@ func (m *model) refreshVisible() {
 	}
 }
 
+func (m *model) setAllVisible(val bool) {
+	for _, realIdx := range m.visibleIdx {
+		m.allTweaks[realIdx].selected = val
+	}
+}
+
 // --- Логика Bubble Tea ---
 
 func (m model) Init() tea.Cmd {
@@ -583,6 +631,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				realIdx := m.visibleIdx[m.cursor]
 				m.allTweaks[realIdx].selected = !m.allTweaks[realIdx].selected
 			}
+		case "a":
+			m.setAllVisible(true)
+		case "n":
+			m.setAllVisible(false)
 		case "i", "?":
 			m.inspectMode = !m.inspectMode
 		case "x":
@@ -618,7 +670,7 @@ func (m model) View() string {
 			b.WriteString(fmt.Sprintf("  %s    ", tab.label))
 		}
 	}
-	b.WriteString("\n" + strings.Repeat("-", 72) + "\n\n")
+	b.WriteString("\n" + strings.Repeat("-", 78) + "\n\n")
 
 	// Список твиков текущей вкладки
 	if len(m.visibleIdx) == 0 {
@@ -643,7 +695,7 @@ func (m model) View() string {
 	}
 
 	// Блок описания и превью команд выбранного твика
-	b.WriteString("\n" + strings.Repeat("-", 72) + "\n")
+	b.WriteString("\n" + strings.Repeat("-", 78) + "\n")
 	if len(m.visibleIdx) > 0 {
 		current := m.allTweaks[m.visibleIdx[m.cursor]]
 		b.WriteString(fmt.Sprintf("Описание: %s\n", current.description))
@@ -656,12 +708,25 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [I] Команды  [X] Запуск  [Q] Выход\n")
+	b.WriteString("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [A/N] Все/Снять  [I] Команды  [X] Запуск  [Q] Выход\n")
 
 	return b.String()
 }
 
-// --- Выполнение ---
+// --- Выполнение и логирование ---
+
+func setupLogger() (io.Writer, io.Writer, *os.File, string) {
+	path := logPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return os.Stdout, os.Stderr, nil, ""
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return os.Stdout, os.Stderr, nil, ""
+	}
+	fmt.Fprintf(f, "=== GNU-TWEAKER LOG (%s) ===\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	return io.MultiWriter(os.Stdout, f), io.MultiWriter(os.Stderr, f), f, path
+}
 
 func main() {
 	if os.Geteuid() == 0 {
@@ -685,13 +750,18 @@ func main() {
 		return
 	}
 
-	fmt.Println("\n[+] Запрос прав администратора для применения выбранных твиков...")
+	outWriter, errWriter, logFile, savedLogPath := setupLogger()
+	if logFile != nil {
+		defer logFile.Close()
+	}
+
+	fmt.Fprintln(outWriter, "\n[+] Запрос прав администратора для применения выбранных твиков...")
 	sudoCheck := exec.Command("sudo", "-v")
 	sudoCheck.Stdout = os.Stdout
 	sudoCheck.Stderr = os.Stderr
 	sudoCheck.Stdin = os.Stdin
 	if err := sudoCheck.Run(); err != nil {
-		fmt.Println("[Ошибка] Не удалось получить права sudo.")
+		fmt.Fprintln(errWriter, "[Ошибка] Не удалось получить права sudo.")
 		os.Exit(1)
 	}
 
@@ -700,24 +770,27 @@ func main() {
 			continue
 		}
 
-		fmt.Printf("\n--> Выполняется: %s\n", t.title)
+		fmt.Fprintf(outWriter, "\n--> Выполняется: %s\n", t.title)
 		for _, cmdArgs := range t.commands {
 			if len(cmdArgs) == 0 {
 				continue
 			}
 
-			fmt.Printf("Запуск: %s\n", strings.Join(cmdArgs, " "))
+			fmt.Fprintf(outWriter, "Запуск: %s\n", strings.Join(cmdArgs, " "))
 			cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			cmd.Stdout = outWriter
+			cmd.Stderr = errWriter
 			cmd.Stdin = os.Stdin
 
 			if err := cmd.Run(); err != nil {
-				fmt.Printf("[Ошибка] Не удалось выполнить: %v\n", err)
+				fmt.Fprintf(errWriter, "[Ошибка] Не удалось выполнить: %v\n", err)
 				break
 			}
 		}
 	}
 
-	fmt.Println("\n[Все готово!] Выбранные настройки применены.")
+	fmt.Fprintln(outWriter, "\n[Все готово!] Выбранные настройки применены.")
+	if savedLogPath != "" {
+		fmt.Printf("Лог выполнения сохранен в: %s\n", savedLogPath)
+	}
 }
