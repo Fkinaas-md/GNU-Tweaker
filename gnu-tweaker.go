@@ -117,7 +117,7 @@ func saveState(allTweaks []tweak) {
 
 type tweak struct {
 	id          string
-	category    string // "system", "kernel", "packages", "tool"
+	category    string // "packages", "system", "kernel", "gaming", "dev", "wm", "tool"
 	title       string
 	description string
 	distros     []string // "all", "arch", "debian"
@@ -132,15 +132,26 @@ type categoryTab struct {
 	label string
 }
 
+type Preset struct {
+	ID          string
+	Name        string
+	Description string
+	TweakIDs    []string
+}
+
 type model struct {
-	distro      DistroInfo
-	tabs        []categoryTab
-	activeTab   int
-	allTweaks   []tweak
-	visibleIdx  []int
-	cursor      int
-	inspectMode bool
-	executed    bool
+	distro       DistroInfo
+	tabs         []categoryTab
+	activeTab    int
+	allTweaks    []tweak
+	visibleIdx   []int
+	cursor       int
+	inspectMode  bool
+	executed     bool
+	presets      []Preset
+	presetMenu   bool
+	presetCursor int
+	statusMsg    string
 }
 
 func checkTweakApplied(cmdArgs []string) bool {
@@ -162,6 +173,89 @@ func currentBinaryPath() string {
 	return exe
 }
 
+func getPresets(distro DistroInfo) []Preset {
+	if distro.ID == "arch" {
+		return []Preset{
+			{
+				ID:          "dev",
+				Name:        "Разработчик (Developer)",
+				Description: "Стек разработки: Git, Neovim, Tmux, Zsh, Docker, шрифты JetBrains Mono, makepkg, ZRAM, SSD trim, sysctl BBR.",
+				TweakIDs: []string{
+					"arch-update", "arch-pacman-conf", "arch-makepkg", "arch-dev-stack",
+					"arch-docker", "sys-ssd-trim", "sys-zram-arch", "sys-journald", "kern-sysctl",
+				},
+			},
+			{
+				ID:          "gamer",
+				Name:        "Геймер (Gaming & Proton)",
+				Description: "Игровая станция: Steam, GameMode, MangoHud, Wine, Proton sysctl (vm.max_map_count, BBR), ZRAM, SSD trim, автоочистка кэша.",
+				TweakIDs: []string{
+					"arch-update", "arch-gaming-tools", "kern-sysctl",
+					"sys-zram-arch", "sys-ssd-trim", "arch-paccache",
+				},
+			},
+			{
+				ID:          "wm-wayland",
+				Name:        "Оконный менеджер Wayland (Hyprland / Sway)",
+				Description: "Современный тайлинг: Hyprland, Waybar, Wofi, Kitty, Grim, Slurp, Dunst, Polkit, PipeWire, FontAwesome, ZRAM.",
+				TweakIDs: []string{
+					"arch-wm-hyprland", "arch-pipewire", "arch-dev-stack",
+					"sys-ssd-trim", "sys-zram-arch",
+				},
+			},
+			{
+				ID:          "wm-i3",
+				Name:        "Оконный менеджер X11 (i3-wm)",
+				Description: "Классический тайлинг X11: i3-wm, Polybar, Picom, Rofi, Feh, Dunst, Flameshot, Kitty, xclip, PipeWire, ZRAM.",
+				TweakIDs: []string{
+					"arch-wm-i3", "arch-pipewire", "arch-dev-stack",
+					"sys-ssd-trim", "sys-zram-arch",
+				},
+			},
+		}
+	}
+
+	// Debian / Default
+	return []Preset{
+		{
+			ID:          "dev",
+			Name:        "Разработчик (Developer)",
+			Description: "Стек разработки: Git, Neovim, Tmux, Zsh, Docker, JetBrains Mono, Python, headers, Nala, ZRAM, SSD trim, sysctl BBR.",
+			TweakIDs: []string{
+				"deb-update", "deb-nala", "deb-dev-headers", "deb-dev-stack",
+				"deb-docker", "sys-ssd-trim", "sys-zram-deb", "sys-journald", "kern-sysctl",
+			},
+		},
+		{
+			ID:          "gamer",
+			Name:        "Геймер (Gaming & Proton)",
+			Description: "Игровая станция: Steam, GameMode, MangoHud, Wine, Proton sysctl (vm.max_map_count, BBR), non-free, ZRAM, SSD trim, очистка apt.",
+			TweakIDs: []string{
+				"deb-update", "deb-nonfree", "deb-gaming-tools", "kern-sysctl",
+				"sys-zram-deb", "sys-ssd-trim", "deb-clean",
+			},
+		},
+		{
+			ID:          "wm-wayland",
+			Name:        "Оконный менеджер Wayland (Sway)",
+			Description: "Стек Sway Wayland: Sway, Waybar, Wofi, Swaybg, Swaylock, Kitty, Grim, Slurp, Mako, Policykit, PipeWire, FontAwesome, ZRAM.",
+			TweakIDs: []string{
+				"deb-wm-sway", "deb-pipewire", "deb-dev-stack",
+				"sys-ssd-trim", "sys-zram-deb",
+			},
+		},
+		{
+			ID:          "wm-i3",
+			Name:        "Оконный менеджер X11 (i3-wm)",
+			Description: "Классический тайлинг X11: i3, Polybar, Picom, Rofi, Feh, Dunst, Flameshot, Kitty, xclip, PipeWire, ZRAM.",
+			TweakIDs: []string{
+				"deb-wm-i3", "deb-pipewire", "deb-dev-stack",
+				"sys-ssd-trim", "sys-zram-deb",
+			},
+		},
+	}
+}
+
 func buildTweaks(distro DistroInfo, saved state) []tweak {
 	pick := func(id string, def bool) bool {
 		if v, ok := saved.Selected[id]; ok {
@@ -172,6 +266,14 @@ func buildTweaks(distro DistroInfo, saved state) []tweak {
 
 	binPath := currentBinaryPath()
 	installTarget := "/usr/bin/gnu-tweaker"
+
+	username := os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("LOGNAME")
+	}
+	if username == "" {
+		username = "1000"
+	}
 
 	// Скрипт добавления nvidia-drm.modeset=1 в GRUB или systemd-boot
 	nvidiaDrmScript := `
@@ -201,7 +303,7 @@ fi`
 			title:       "Обновление системы (pacman -Syu)",
 			description: "Полное обновление всех установленных пакетов и баз данных Arch Linux.",
 			distros:     []string{"arch"},
-			selected:    pick("arch-update", true),
+			selected:    pick("arch-update", false),
 			commands:    [][]string{{"sudo", "pacman", "-Syu", "--noconfirm"}},
 		},
 		{
@@ -210,7 +312,7 @@ fi`
 			title:       "Твики pacman.conf (Color, ILoveCandy, ParallelDownloads)",
 			description: "Включает цветной вывод, анимацию Пакмана и параллельную загрузку в 5 потоков.",
 			distros:     []string{"arch"},
-			selected:    pick("arch-pacman-conf", true),
+			selected:    pick("arch-pacman-conf", false),
 			checkCmd:    []string{"grep", "-q", "^ILoveCandy", "/etc/pacman.conf"},
 			commands: [][]string{
 				{"sudo", "sed", "-i", "s/^#Color/Color/", "/etc/pacman.conf"},
@@ -224,7 +326,7 @@ fi`
 			title:       "Многопоточная сборка в makepkg.conf",
 			description: "Настраивает MAKEFLAGS=\"-j$(nproc)\" и многопоточное сжатие zstd для быстрой сборки из AUR.",
 			distros:     []string{"arch"},
-			selected:    pick("arch-makepkg", true),
+			selected:    pick("arch-makepkg", false),
 			checkCmd:    []string{"grep", "-q", `^MAKEFLAGS="-j`, "/etc/makepkg.conf"},
 			commands: [][]string{
 				{"sudo", "sed", "-i", `s/^#MAKEFLAGS=.*/MAKEFLAGS="-j$(nproc)"/`, "/etc/makepkg.conf"},
@@ -262,7 +364,7 @@ fi`
 			title:       "Автоочистка кэша (paccache.timer)",
 			description: "Устанавливает pacman-contrib и включает еженедельную очистку старых версий пакетов.",
 			distros:     []string{"arch"},
-			selected:    pick("arch-paccache", true),
+			selected:    pick("arch-paccache", false),
 			checkCmd:    []string{"systemctl", "is-enabled", "paccache.timer"},
 			commands: [][]string{
 				{"sudo", "pacman", "-S", "--needed", "pacman-contrib", "--noconfirm"},
@@ -286,7 +388,7 @@ fi`
 			title:       "Обновление системы (apt full-upgrade)",
 			description: "Обновляет списки пакетов и выполняет полное обновление Debian 13 (Trixie).",
 			distros:     []string{"debian"},
-			selected:    pick("deb-update", true),
+			selected:    pick("deb-update", false),
 			commands: [][]string{
 				{"sudo", "apt", "update"},
 				{"sudo", "apt", "full-upgrade", "-y"},
@@ -298,7 +400,7 @@ fi`
 			title:       "Подключить contrib и non-free-firmware",
 			description: "Добавляет компоненты contrib, non-free и non-free-firmware в репозитории Debian (DEB822 и legacy).",
 			distros:     []string{"debian"},
-			selected:    pick("deb-nonfree", true),
+			selected:    pick("deb-nonfree", false),
 			checkCmd:    []string{"grep", "-rq", "non-free-firmware", "/etc/apt/sources.list", "/etc/apt/sources.list.d/"},
 			commands: [][]string{
 				{"sudo", "bash", "-c", `if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources; fi`},
@@ -312,7 +414,7 @@ fi`
 			title:       "Установка Nala (улучшенный фронтенд для APT)",
 			description: "Устанавливает nala — быструю и читаемую обертку над apt с параллельной загрузкой.",
 			distros:     []string{"debian"},
-			selected:    pick("deb-nala", true),
+			selected:    pick("deb-nala", false),
 			checkCmd:    []string{"which", "nala"},
 			commands: [][]string{
 				{"sudo", "apt", "update"},
@@ -344,7 +446,7 @@ fi`
 			},
 		},
 
-		// ==================== СИСТЕМА (ДРАЙВЕРЫ И ОПТИМИЗАЦИИ) ====================
+		// ==================== СИСТЕМА ====================
 		{
 			id:          "deb-nvidia-full",
 			category:    "system",
@@ -392,7 +494,7 @@ fi`
 			title:       "Оптимизация SSD (fstrim.timer)",
 			description: "Включает еженедельный TRIM для продления срока службы и скорости SSD.",
 			distros:     []string{"all"},
-			selected:    pick("sys-ssd-trim", true),
+			selected:    pick("sys-ssd-trim", false),
 			checkCmd:    []string{"systemctl", "is-enabled", "fstrim.timer"},
 			commands: [][]string{
 				{"sudo", "systemctl", "enable", "--now", "fstrim.timer"},
@@ -404,7 +506,7 @@ fi`
 			title:       "Ограничение размера логов journald (до 100M)",
 			description: "Создает /etc/systemd/journald.conf.d/size.conf с лимитом SystemMaxUse=100M.",
 			distros:     []string{"all"},
-			selected:    pick("sys-journald", true),
+			selected:    pick("sys-journald", false),
 			checkCmd:    []string{"test", "-f", "/etc/systemd/journald.conf.d/size.conf"},
 			commands: [][]string{
 				{"sudo", "mkdir", "-p", "/etc/systemd/journald.conf.d"},
@@ -418,7 +520,7 @@ fi`
 			title:       "Настройка ZRAM (zram-generator + zstd)",
 			description: "Создает сжатый swap-раздел в оперативной памяти (половина объема ОЗУ, алгоритм zstd).",
 			distros:     []string{"arch"},
-			selected:    pick("sys-zram-arch", true),
+			selected:    pick("sys-zram-arch", false),
 			checkCmd:    []string{"test", "-f", "/etc/systemd/zram-generator.conf"},
 			commands: [][]string{
 				{"sudo", "pacman", "-S", "--needed", "zram-generator", "--noconfirm"},
@@ -433,7 +535,7 @@ fi`
 			title:       "Настройка ZRAM (systemd-zram-generator + zstd)",
 			description: "Устанавливает systemd-zram-generator и настраивает сжатие zstd в оперативной памяти.",
 			distros:     []string{"debian"},
-			selected:    pick("sys-zram-deb", true),
+			selected:    pick("sys-zram-deb", false),
 			checkCmd:    []string{"test", "-f", "/etc/systemd/zram-generator.conf"},
 			commands: [][]string{
 				{"sudo", "apt", "install", "-y", "systemd-zram-generator"},
@@ -456,14 +558,14 @@ fi`
 			},
 		},
 
-		// ==================== СЕТЬ И ЯДРО (ОБЩИЕ) ====================
+		// ==================== СЕТЬ И ЯДРО ====================
 		{
 			id:          "kern-sysctl",
 			category:    "kernel",
-			title:       "Оптимизация sysctl (BBR, max_map_count, swappiness)",
-			description: "Включает TCP BBR, повышает vm.max_map_count для игр (Proton/Wine) и настраивает swappiness.",
+			title:       "Оптимизация sysctl (BBR, max_map_count для игр, swappiness)",
+			description: "Включает TCP BBR, повышает vm.max_map_count (2147483642 для Proton/Wine) и выставляет swappiness.",
 			distros:     []string{"all"},
-			selected:    pick("kern-sysctl", true),
+			selected:    pick("kern-sysctl", false),
 			checkCmd:    []string{"test", "-f", "/etc/sysctl.d/99-gnu-tweaker.conf"},
 			commands: [][]string{
 				{"sudo", "bash", "-c", `cat << 'EOF' > /etc/sysctl.d/99-gnu-tweaker.conf
@@ -507,7 +609,181 @@ EOF`},
 			},
 		},
 
-		// ==================== УТИЛИТА (УСТАНОВКА В /USR/BIN) ====================
+		// ==================== ГЕЙМИНГ ====================
+		{
+			id:          "arch-gaming-tools",
+			category:    "gaming",
+			title:       "Игровой стек (Steam, GameMode, MangoHud, Wine)",
+			description: "Включает multilib, устанавливает Steam, gamemode, mangohud, goverlay и wine для игр.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-gaming-tools", false),
+			checkCmd:    []string{"which", "steam"},
+			commands: [][]string{
+				{"sudo", "sed", "-i", `/^#\[multilib\]/,+1 s/^#//`, "/etc/pacman.conf"},
+				{"sudo", "pacman", "-Sy", "--needed", "steam", "gamemode", "lib32-gamemode", "mangohud", "lib32-mangohud", "wine", "goverlay", "--noconfirm"},
+			},
+		},
+		{
+			id:          "deb-gaming-tools",
+			category:    "gaming",
+			title:       "Игровой стек (Steam, GameMode, MangoHud, Wine)",
+			description: "Включает архитектуру i386, репозитории non-free, ставит steam-installer, gamemode, mangohud, goverlay и wine.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-gaming-tools", false),
+			checkCmd:    []string{"which", "gamemoded"},
+			commands: [][]string{
+				{"sudo", "dpkg", "--add-architecture", "i386"},
+				{"sudo", "bash", "-c", `if [ -f /etc/apt/sources.list.d/debian.sources ]; then sed -i 's/^Components: main$/Components: main contrib non-free non-free-firmware/' /etc/apt/sources.list.d/debian.sources; fi`},
+				{"sudo", "bash", "-c", `if [ -f /etc/apt/sources.list ]; then sed -i 's/ main$/ main contrib non-free non-free-firmware/' /etc/apt/sources.list; fi`},
+				{"sudo", "apt", "update"},
+				{"sudo", "apt", "install", "-y", "steam-installer", "gamemode", "mangohud", "goverlay", "wine", "wine32", "wine64"},
+			},
+		},
+
+		// ==================== РАЗРАБОТКА ====================
+		{
+			id:          "arch-dev-stack",
+			category:    "dev",
+			title:       "Стек разработчика (Git, Neovim, Tmux, Zsh, JetBrains Mono)",
+			description: "Устанавливает: git, base-devel, curl, wget, jq, ripgrep, htop, tmux, neovim, zsh и шрифты JetBrains Mono.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-dev-stack", false),
+			checkCmd:    []string{"which", "nvim"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "git", "base-devel", "curl", "wget", "jq", "ripgrep", "htop", "tmux", "neovim", "zsh", "ttf-jetbrains-mono-nerd", "--noconfirm"},
+			},
+		},
+		{
+			id:          "deb-dev-stack",
+			category:    "dev",
+			title:       "Стек разработчика (Git, Neovim, Tmux, Zsh, JetBrains Mono, Python)",
+			description: "Устанавливает: git, build-essential, curl, wget, jq, ripgrep, htop, tmux, neovim, zsh, python3-venv и шрифты JetBrains Mono.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-dev-stack", false),
+			checkCmd:    []string{"which", "nvim"},
+			commands: [][]string{
+				{"sudo", "apt", "update"},
+				{"sudo", "apt", "install", "-y", "git", "build-essential", "curl", "wget", "jq", "ripgrep", "htop", "tmux", "neovim", "zsh", "python3-venv", "python3-pip", "fonts-jetbrains-mono"},
+			},
+		},
+		{
+			id:          "arch-docker",
+			category:    "dev",
+			title:       "Контейнеризация (Docker & Docker Compose)",
+			description: "Устанавливает Docker, compose, запускает службу и добавляет текущего пользователя в группу docker.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-docker", false),
+			checkCmd:    []string{"systemctl", "is-enabled", "docker.service"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "docker", "docker-compose", "--noconfirm"},
+				{"sudo", "systemctl", "enable", "--now", "docker.service"},
+				{"sudo", "usermod", "-aG", "docker", username},
+			},
+		},
+		{
+			id:          "deb-docker",
+			category:    "dev",
+			title:       "Контейнеризация (Docker & Docker Compose)",
+			description: "Устанавливает docker.io, docker-compose-plugin, включает службу docker и добавляет пользователя в группу docker.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-docker", false),
+			checkCmd:    []string{"systemctl", "is-enabled", "docker.service"},
+			commands: [][]string{
+				{"sudo", "apt", "install", "-y", "docker.io", "docker-compose-plugin"},
+				{"sudo", "systemctl", "enable", "--now", "docker"},
+				{"sudo", "usermod", "-aG", "docker", username},
+			},
+		},
+
+		// ==================== ОКОННЫЕ МЕНЕДЖЕРЫ ====================
+		{
+			id:          "arch-wm-hyprland",
+			category:    "wm",
+			title:       "Стек Hyprland (современный Wayland-тайлинг + зависимости)",
+			description: "Устанавливает Hyprland, Waybar, Wofi, Kitty, Hyprpaper, Hyprlock, Hypridle, Grim, Slurp, wl-clipboard, Dunst, Polkit и порталы.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-wm-hyprland", false),
+			checkCmd:    []string{"which", "hyprland"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "hyprland", "waybar", "wofi", "kitty", "hyprpaper", "hyprlock", "hypridle", "grim", "slurp", "wl-clipboard", "dunst", "polkit-gnome", "xdg-desktop-portal-hyprland", "xdg-desktop-portal-gtk", "ttf-font-awesome", "--noconfirm"},
+			},
+		},
+		{
+			id:          "arch-wm-sway",
+			category:    "wm",
+			title:       "Стек Sway (i3-совместимый Wayland + зависимости)",
+			description: "Устанавливает Sway, Waybar, Wofi, Swaybg, Swaylock, Swayidle, Kitty, Grim, Slurp, wl-clipboard, Mako, Polkit и xdg-desktop-portal-wlr.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-wm-sway", false),
+			checkCmd:    []string{"which", "sway"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "sway", "waybar", "wofi", "swaybg", "swaylock", "swayidle", "foot", "kitty", "grim", "slurp", "wl-clipboard", "mako", "polkit-gnome", "xdg-desktop-portal-wlr", "xdg-desktop-portal-gtk", "ttf-font-awesome", "--noconfirm"},
+			},
+		},
+		{
+			id:          "deb-wm-sway",
+			category:    "wm",
+			title:       "Стек Sway (современный Wayland-тайлинг + зависимости)",
+			description: "Устанавливает Sway, Waybar, Wofi, Swaybg, Swaylock, Swayidle, Kitty, Grim, Slurp, wl-clipboard, Mako, Policykit и порталы Wayland.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-wm-sway", false),
+			checkCmd:    []string{"which", "sway"},
+			commands: [][]string{
+				{"sudo", "apt", "install", "-y", "sway", "waybar", "wofi", "swaybg", "swaylock", "swayidle", "kitty", "grim", "slurp", "wl-clipboard", "mako-notifier", "policykit-1-gnome", "xdg-desktop-portal-wlr", "xdg-desktop-portal-gtk", "fonts-font-awesome"},
+			},
+		},
+		{
+			id:          "arch-wm-i3",
+			category:    "wm",
+			title:       "Стек i3-wm (классический тайлинг X11 + зависимости)",
+			description: "Устанавливает i3-wm, i3status, i3lock, picom (композитор), polybar, rofi, feh, dunst, flameshot, kitty, xclip, xorg.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-wm-i3", false),
+			checkCmd:    []string{"which", "i3"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "i3-wm", "i3status", "i3lock", "picom", "polybar", "rofi", "feh", "dunst", "flameshot", "kitty", "xclip", "xorg-xinit", "xorg-server", "--noconfirm"},
+			},
+		},
+		{
+			id:          "deb-wm-i3",
+			category:    "wm",
+			title:       "Стек i3-wm (классический тайлинг X11 + зависимости)",
+			description: "Устанавливает i3, polybar, picom (композитор), rofi, feh, dunst, flameshot, kitty, xclip, xorg.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-wm-i3", false),
+			checkCmd:    []string{"which", "i3"},
+			commands: [][]string{
+				{"sudo", "apt", "install", "-y", "i3", "i3status", "i3lock", "polybar", "picom", "rofi", "feh", "dunst", "flameshot", "kitty", "xclip", "xorg"},
+			},
+		},
+		{
+			id:          "arch-pipewire",
+			category:    "wm",
+			title:       "Звуковой сервер PipeWire & WirePlumber (для WM)",
+			description: "Устанавливает и включает аудиостек PipeWire с низкой задержкой для тайлинговых окружений.",
+			distros:     []string{"arch"},
+			selected:    pick("arch-pipewire", false),
+			checkCmd:    []string{"which", "pipewire"},
+			commands: [][]string{
+				{"sudo", "pacman", "-S", "--needed", "pipewire", "pipewire-pulse", "pipewire-alsa", "pipewire-jack", "wireplumber", "--noconfirm"},
+				{"systemctl", "--user", "enable", "--now", "pipewire", "pipewire-pulse", "wireplumber"},
+			},
+		},
+		{
+			id:          "deb-pipewire",
+			category:    "wm",
+			title:       "Звуковой сервер PipeWire & WirePlumber (для WM)",
+			description: "Устанавливает и включает аудиостек PipeWire с низкой задержкой для тайлинговых окружений.",
+			distros:     []string{"debian"},
+			selected:    pick("deb-pipewire", false),
+			checkCmd:    []string{"which", "pipewire"},
+			commands: [][]string{
+				{"sudo", "apt", "install", "-y", "pipewire-audio", "wireplumber", "pipewire-pulse"},
+				{"systemctl", "--user", "enable", "--now", "pipewire", "pipewire-pulse", "wireplumber"},
+			},
+		},
+
+		// ==================== УТИЛИТА ====================
 		{
 			id:          "tool-install-usr-bin",
 			category:    "tool",
@@ -556,12 +832,16 @@ func initialModel() model {
 	distro := detectDistro()
 	saved := loadState()
 	tweaks := buildTweaks(distro, saved)
+	presets := getPresets(distro)
 
 	tabs := []categoryTab{
 		{id: "all", label: "Все"},
 		{id: "packages", label: "Пакеты"},
 		{id: "system", label: "Система"},
 		{id: "kernel", label: "Сеть и Ядро"},
+		{id: "gaming", label: "Гейминг"},
+		{id: "dev", label: "Разработка"},
+		{id: "wm", label: "Оконные WM"},
 		{id: "tool", label: "Утилита"},
 	}
 
@@ -570,9 +850,31 @@ func initialModel() model {
 		tabs:      tabs,
 		activeTab: 0,
 		allTweaks: tweaks,
+		presets:   presets,
 	}
+
 	m.refreshVisible()
 	return m
+}
+
+func (m *model) applyPreset(p Preset) {
+	targetMap := make(map[string]bool)
+	for _, id := range p.TweakIDs {
+		targetMap[id] = true
+	}
+	count := 0
+	for i := range m.allTweaks {
+		if m.allTweaks[i].category == "tool" {
+			continue
+		}
+		if targetMap[m.allTweaks[i].id] {
+			m.allTweaks[i].selected = true
+			count++
+		} else {
+			m.allTweaks[i].selected = false
+		}
+	}
+	m.statusMsg = fmt.Sprintf("Применен пресет: \"%s\" (отмечено %d твиков)", p.Name, count)
 }
 
 func (m *model) refreshVisible() {
@@ -596,6 +898,11 @@ func (m *model) setAllVisible(val bool) {
 	for _, realIdx := range m.visibleIdx {
 		m.allTweaks[realIdx].selected = val
 	}
+	if val {
+		m.statusMsg = "Отмечены все видимые пункты"
+	} else {
+		m.statusMsg = "Сняты отметки со всех видимых пунктов"
+	}
 }
 
 // --- Логика Bubble Tea ---
@@ -607,9 +914,75 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.presetMenu {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc", "p", "P":
+				m.presetMenu = false
+				return m, nil
+			case "up", "k":
+				if m.presetCursor > 0 {
+					m.presetCursor--
+				}
+			case "down", "j":
+				if m.presetCursor < len(m.presets)-1 {
+					m.presetCursor++
+				}
+			case "enter", " ":
+				if len(m.presets) > 0 {
+					m.applyPreset(m.presets[m.presetCursor])
+					m.presetMenu = false
+				}
+				return m, nil
+			case "1":
+				if len(m.presets) > 0 {
+					m.applyPreset(m.presets[0])
+					m.presetMenu = false
+				}
+				return m, nil
+			case "2":
+				if len(m.presets) > 1 {
+					m.applyPreset(m.presets[1])
+					m.presetMenu = false
+				}
+				return m, nil
+			case "3":
+				if len(m.presets) > 2 {
+					m.applyPreset(m.presets[2])
+					m.presetMenu = false
+				}
+				return m, nil
+			case "4":
+				if len(m.presets) > 3 {
+					m.applyPreset(m.presets[3])
+					m.presetMenu = false
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "p", "P":
+			m.presetMenu = true
+			return m, nil
+		case "1":
+			if len(m.presets) > 0 {
+				m.applyPreset(m.presets[0])
+			}
+		case "2":
+			if len(m.presets) > 1 {
+				m.applyPreset(m.presets[1])
+			}
+		case "3":
+			if len(m.presets) > 2 {
+				m.applyPreset(m.presets[2])
+			}
+		case "4":
+			if len(m.presets) > 3 {
+				m.applyPreset(m.presets[3])
+			}
 		case "tab", "right", "l":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
 			m.cursor = 0
@@ -633,7 +1006,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "a":
 			m.setAllVisible(true)
-		case "n":
+		case "n", "0":
 			m.setAllVisible(false)
 		case "i", "?":
 			m.inspectMode = !m.inspectMode
@@ -645,9 +1018,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) viewPresetMenu() string {
+	var b strings.Builder
+	b.WriteString("============================= ВЫБОР ПРЕСЕТА =============================\n")
+	b.WriteString("Быстрая настройка системы под ваш сценарий использования.\n")
+	b.WriteString("Выберите профиль, чтобы автоматически отметить необходимый набор твиков:\n\n")
+
+	for i, p := range m.presets {
+		cursor := "  "
+		if m.presetCursor == i {
+			cursor = "> "
+		}
+		b.WriteString(fmt.Sprintf("%s[%d] %s\n", cursor, i+1, p.Name))
+		b.WriteString(fmt.Sprintf("      %s\n\n", p.Description))
+	}
+
+	b.WriteString(strings.Repeat("-", 75) + "\n")
+	b.WriteString("[↑/↓] Выбор стрелками  [Enter] Применить  [1-4] Быстрый выбор  [Esc / P] Отмена\n")
+	return b.String()
+}
+
 func (m model) View() string {
 	if m.executed {
 		return "Выход из интерфейса настройки. Начинаем применение твиков...\n"
+	}
+
+	if m.presetMenu {
+		return m.viewPresetMenu()
 	}
 
 	var b strings.Builder
@@ -671,6 +1068,11 @@ func (m model) View() string {
 		}
 	}
 	b.WriteString("\n" + strings.Repeat("-", 78) + "\n\n")
+
+	// Статусное сообщение (если применен пресет)
+	if m.statusMsg != "" {
+		b.WriteString(fmt.Sprintf("Статус: %s\n\n", m.statusMsg))
+	}
 
 	// Список твиков текущей вкладки
 	if len(m.visibleIdx) == 0 {
@@ -708,7 +1110,7 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [A/N] Все/Снять  [I] Команды  [X] Запуск  [Q] Выход\n")
+	b.WriteString("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [1-4 / P] Пресеты  [A/N] Все/Снять  [I] Команды  [X] Запуск  [Q] Выход\n")
 
 	return b.String()
 }
