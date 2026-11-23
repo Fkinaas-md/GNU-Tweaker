@@ -20,6 +20,7 @@ type DistroInfo struct {
 	ID       string
 	Name     string
 	Codename string
+	IsMusl   bool
 }
 
 func detectDistro() DistroInfo {
@@ -57,6 +58,18 @@ func detectDistro() DistroInfo {
 		info.ID = "arch"
 	} else if info.ID != "debian" && strings.Contains(idLike, "debian") {
 		info.ID = "debian"
+	} else if info.ID != "void" && strings.Contains(idLike, "void") {
+		info.ID = "void"
+	}
+
+	if info.ID == "void" {
+		if matches, _ := filepath.Glob("/lib/ld-musl-*"); len(matches) > 0 {
+			info.IsMusl = true
+		} else if out, err := exec.Command("xbps-uhelper", "arch").Output(); err == nil {
+			if strings.Contains(string(out), "musl") {
+				info.IsMusl = true
+			}
+		}
 	}
 
 	return info
@@ -120,7 +133,8 @@ type tweak struct {
 	category    string // "packages", "system", "kernel", "gaming", "dev", "wm", "tool"
 	title       string
 	description string
-	distros     []string // "all", "arch", "debian"
+	distros     []string // "all", "arch", "debian", "void"
+	glibcOnly   bool
 	selected    bool
 	applied     bool
 	checkCmd    []string
@@ -215,6 +229,56 @@ func getPresets(distro DistroInfo) []Preset {
 		}
 	}
 
+	if distro.ID == "void" {
+		return []Preset{
+			{
+				ID:          "xfce",
+				Name:        "Рабочий стол Xfce4 (Полный стек + Xarchiver)",
+				Description: "Готовый десктоп: Xfce4, Xarchiver + плагин Thunar, Atril (PDF), Parole, Mousepad, Ristretto, DejaVu, PipeWire, ZRAM, TRIM.",
+				TweakIDs: []string{
+					"void-update", "void-repos", "void-de-xfce4", "void-pipewire",
+					"void-zram", "void-ssd-trim", "void-socklog", "void-chrony",
+				},
+			},
+			{
+				ID:          "dev",
+				Name:        "Разработчик (Developer)",
+				Description: "Стек разработки: Git, base-devel, Neovim, Tmux, Zsh, Docker, JetBrains Mono, xtools, ZRAM, TRIM, sysctl BBR.",
+				TweakIDs: []string{
+					"void-update", "void-tools", "void-dev-stack", "void-docker",
+					"void-zram", "void-ssd-trim", "void-socklog", "kern-sysctl",
+				},
+			},
+			{
+				ID:          "gamer",
+				Name:        "Геймер (Gaming & Proton)",
+				Description: "Игровая станция: Steam, GameMode, MangoHud, Wine, Proton sysctl (vm.max_map_count, BBR), nonfree/multilib, ZRAM, TRIM.",
+				TweakIDs: []string{
+					"void-update", "void-repos", "void-gaming-tools", "kern-sysctl",
+					"void-zram", "void-ssd-trim", "void-clean",
+				},
+			},
+			{
+				ID:          "wm-wayland",
+				Name:        "Оконный менеджер Wayland (Sway)",
+				Description: "Тайлинг Wayland: Sway, Waybar, Wofi, Foot, Kitty, Grim, Slurp, Mako, Polkit, PipeWire, ZRAM.",
+				TweakIDs: []string{
+					"void-update", "void-wm-sway", "void-pipewire", "void-dev-stack",
+					"void-zram", "void-ssd-trim",
+				},
+			},
+			{
+				ID:          "wm-i3",
+				Name:        "Оконный менеджер X11 (i3-wm)",
+				Description: "Классический тайлинг X11: i3, Polybar, Picom, Rofi, Feh, Dunst, Flameshot, Kitty, xclip, PipeWire, ZRAM.",
+				TweakIDs: []string{
+					"void-update", "void-wm-i3", "void-pipewire", "void-dev-stack",
+					"void-zram", "void-ssd-trim",
+				},
+			},
+		}
+	}
+
 	// Debian / Default
 	return []Preset{
 		{
@@ -277,7 +341,6 @@ func buildTweaks(distro DistroInfo, saved state) []tweak {
 		username = "1000"
 	}
 
-	// Скрипт добавления nvidia-drm.modeset=1 в GRUB или systemd-boot
 	nvidiaDrmScript := `
 if [ -f /etc/default/grub ]; then
 	if ! grep -q "nvidia-drm.modeset=1" /etc/default/grub; then
@@ -377,6 +440,11 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 [DPY:DP-1]/ColorRange=0
 [DPY:DP-1]/SynchronousPaletteUpdates=0
 [GPU:0]/GPUPowerMizerMode=1`
+
+	voidReposCmd := []string{"sudo", "xbps-install", "-Sy", "void-repo-nonfree", "void-repo-multilib", "void-repo-multilib-nonfree"}
+	if distro.IsMusl {
+		voidReposCmd = []string{"sudo", "xbps-install", "-Sy", "void-repo-nonfree"}
+	}
 
 	rawTweaks := []tweak{
 		// ==================== ПАКЕТЫ (ARCH) ====================
@@ -529,6 +597,56 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 			},
 		},
 
+		// ==================== ПАКЕТЫ (VOID LINUX) ====================
+		{
+			id:          "void-update",
+			category:    "packages",
+			title:       "Обновление системы (xbps-install -Suy)",
+			description: "Обновляет пакетный менеджер xbps и все установленные пакеты в Void Linux.",
+			distros:     []string{"void"},
+			selected:    pick("void-update", false),
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Suy", "xbps"},
+				{"sudo", "xbps-install", "-Suy"},
+			},
+		},
+		{
+			id:          "void-repos",
+			category:    "packages",
+			title:       "Подключить репозитории nonfree и multilib",
+			description: "Устанавливает void-repo-nonfree и multilib-репозитории (на glibc) для драйверов, Steam и кодеков.",
+			distros:     []string{"void"},
+			selected:    pick("void-repos", false),
+			checkCmd:    []string{"xbps-query", "void-repo-nonfree"},
+			commands: [][]string{
+				voidReposCmd,
+				{"sudo", "xbps-install", "-S"},
+			},
+		},
+		{
+			id:          "void-tools",
+			category:    "packages",
+			title:       "Утилиты XBPS и зеркала (xtools, xmirror)",
+			description: "Устанавливает xtools (xi, xlocate, xcheckrestart) и xmirror для выбора быстрого зеркала.",
+			distros:     []string{"void"},
+			selected:    pick("void-tools", false),
+			checkCmd:    []string{"which", "xlocate"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "xtools", "xmirror"},
+			},
+		},
+		{
+			id:          "void-clean",
+			category:    "packages",
+			title:       "Очистка кэша и удаление сирот (xbps-remove -Oo)",
+			description: "Удаляет осиротевшие пакеты-зависимости и старые версии архивов из /var/cache/xbps.",
+			distros:     []string{"void"},
+			selected:    pick("void-clean", false),
+			commands: [][]string{
+				{"sudo", "xbps-remove", "-Oo"},
+			},
+		},
+
 		// ==================== СИСТЕМА ====================
 		{
 			id:          "deb-nvidia-full",
@@ -557,6 +675,20 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 			commands: [][]string{
 				{"sudo", "sed", "-i", `/^#\[multilib\]/,+1 s/^#//`, "/etc/pacman.conf"},
 				{"sudo", "pacman", "-Sy", "--needed", "linux-headers", "nvidia-dkms", "nvidia-utils", "lib32-nvidia-utils", "nvidia-settings", "--noconfirm"},
+			},
+		},
+		{
+			id:          "void-nvidia-full",
+			category:    "system",
+			title:       "Драйверы NVIDIA (nvidia + nvidia-libs-32bit)",
+			description: "Подключает nonfree/multilib, ставит nvidia, nvidia-libs-32bit и linux-headers (только glibc).",
+			distros:     []string{"void"},
+			glibcOnly:   true,
+			selected:    pick("void-nvidia-full", false),
+			checkCmd:    []string{"xbps-query", "nvidia"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "void-repo-nonfree", "void-repo-multilib", "void-repo-multilib-nonfree"},
+				{"sudo", "xbps-install", "-Sy", "linux-headers", "nvidia", "nvidia-libs-32bit"},
 			},
 		},
 		{
@@ -602,7 +734,7 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 			category:    "system",
 			title:       "Оптимизация SSD (fstrim.timer)",
 			description: "Включает еженедельный TRIM для продления срока службы и скорости SSD.",
-			distros:     []string{"all"},
+			distros:     []string{"arch", "debian"},
 			selected:    pick("sys-ssd-trim", false),
 			checkCmd:    []string{"systemctl", "is-enabled", "fstrim.timer"},
 			commands: [][]string{
@@ -610,17 +742,58 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 			},
 		},
 		{
+			id:          "void-ssd-trim",
+			category:    "system",
+			title:       "Оптимизация SSD через runit (snooze-weekly)",
+			description: "Устанавливает snooze и включает еженедельный сервис fstrim в /var/service/snooze-weekly.",
+			distros:     []string{"void"},
+			selected:    pick("void-ssd-trim", false),
+			checkCmd:    []string{"test", "-L", "/var/service/snooze-weekly"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "snooze"},
+				{"sudo", "ln", "-sf", "/etc/sv/snooze-weekly", "/var/service/"},
+			},
+		},
+		{
 			id:          "sys-journald",
 			category:    "system",
 			title:       "Ограничение размера логов journald (до 100M)",
 			description: "Создает /etc/systemd/journald.conf.d/size.conf с лимитом SystemMaxUse=100M.",
-			distros:     []string{"all"},
+			distros:     []string{"arch", "debian"},
 			selected:    pick("sys-journald", false),
 			checkCmd:    []string{"test", "-f", "/etc/systemd/journald.conf.d/size.conf"},
 			commands: [][]string{
 				{"sudo", "mkdir", "-p", "/etc/systemd/journald.conf.d"},
 				{"sudo", "bash", "-c", `printf "[Journal]\nSystemMaxUse=100M\n" > /etc/systemd/journald.conf.d/size.conf`},
 				{"sudo", "systemctl", "restart", "systemd-journald"},
+			},
+		},
+		{
+			id:          "void-socklog",
+			category:    "system",
+			title:       "Системное логирование (socklog-void + runit)",
+			description: "Устанавливает socklog-void, запускает сервисы socklog-unix и nanoklogd, добавляет в группу socklog.",
+			distros:     []string{"void"},
+			selected:    pick("void-socklog", false),
+			checkCmd:    []string{"test", "-L", "/var/service/socklog-unix"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "socklog-void"},
+				{"sudo", "ln", "-sf", "/etc/sv/socklog-unix", "/var/service/"},
+				{"sudo", "ln", "-sf", "/etc/sv/nanoklogd", "/var/service/"},
+				{"sudo", "usermod", "-aG", "socklog", username},
+			},
+		},
+		{
+			id:          "void-chrony",
+			category:    "system",
+			title:       "Синхронизация времени NTP (chrony)",
+			description: "Устанавливает chrony и активирует демон chronyd в runit для точного системного времени.",
+			distros:     []string{"void"},
+			selected:    pick("void-chrony", false),
+			checkCmd:    []string{"test", "-L", "/var/service/chronyd"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "chrony"},
+				{"sudo", "ln", "-sf", "/etc/sv/chronyd", "/var/service/"},
 			},
 		},
 		{
@@ -651,6 +824,20 @@ Timer = PowerMizer_Monitor_(GPU_0),Yes,1000
 				{"sudo", "bash", "-c", `printf "[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n" > /etc/systemd/zram-generator.conf`},
 				{"sudo", "systemctl", "daemon-reload"},
 				{"sudo", "systemctl", "start", "systemd-zram-setup@zram0.service"},
+			},
+		},
+		{
+			id:          "void-zram",
+			category:    "system",
+			title:       "Настройка ZRAM (zramen + runit)",
+			description: "Устанавливает zramen, выставляет сжатие zstd и запускает сервис в /var/service/zramen.",
+			distros:     []string{"void"},
+			selected:    pick("void-zram", false),
+			checkCmd:    []string{"test", "-L", "/var/service/zramen"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "zramen"},
+				{"sudo", "bash", "-c", `printf "ZRAM_COMP_ALGORITHM=zstd\nZRAM_SIZE=50\n" > /etc/sv/zramen/conf`},
+				{"sudo", "ln", "-sf", "/etc/sv/zramen", "/var/service/"},
 			},
 		},
 		{
@@ -717,6 +904,22 @@ EOF`},
 				{"sudo", "ufw", "--force", "enable"},
 			},
 		},
+		{
+			id:          "net-ufw-void",
+			category:    "kernel",
+			title:       "Базовая настройка фаервола (UFW + runit)",
+			description: "Устанавливает ufw, настраивает правила по умолчанию и включает сервис в /var/service/ufw.",
+			distros:     []string{"void"},
+			selected:    pick("net-ufw-void", false),
+			checkCmd:    []string{"test", "-L", "/var/service/ufw"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "ufw"},
+				{"sudo", "ufw", "default", "deny", "incoming"},
+				{"sudo", "ufw", "default", "allow", "outgoing"},
+				{"sudo", "ufw", "--force", "enable"},
+				{"sudo", "ln", "-sf", "/etc/sv/ufw", "/var/service/"},
+			},
+		},
 
 		// ==================== ГЕЙМИНГ ====================
 		{
@@ -748,6 +951,20 @@ EOF`},
 				{"sudo", "apt", "install", "-y", "steam-installer", "gamemode", "mangohud", "goverlay", "wine", "wine32", "wine64"},
 			},
 		},
+		{
+			id:          "void-gaming-tools",
+			category:    "gaming",
+			title:       "Игровой стек (Steam, GameMode, MangoHud, Wine, 32-bit libs)",
+			description: "Подключает nonfree/multilib, ставит Steam, gamemode, mangohud, wine, vulkan-loader и 32-битные библиотеки.",
+			distros:     []string{"void"},
+			glibcOnly:   true,
+			selected:    pick("void-gaming-tools", false),
+			checkCmd:    []string{"which", "steam"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "void-repo-nonfree", "void-repo-multilib", "void-repo-multilib-nonfree"},
+				{"sudo", "xbps-install", "-Sy", "steam", "gamemode", "libgamemode-32bit", "mangohud", "mangohud-32bit", "wine", "vulkan-loader", "vulkan-loader-32bit", "mesa-dri-32bit"},
+			},
+		},
 
 		// ==================== РАЗРАБОТКА ====================
 		{
@@ -773,6 +990,18 @@ EOF`},
 			commands: [][]string{
 				{"sudo", "apt", "update"},
 				{"sudo", "apt", "install", "-y", "git", "build-essential", "curl", "wget", "jq", "ripgrep", "htop", "tmux", "neovim", "zsh", "python3-venv", "python3-pip", "fonts-jetbrains-mono"},
+			},
+		},
+		{
+			id:          "void-dev-stack",
+			category:    "dev",
+			title:       "Стек разработчика (Git, base-devel, Neovim, Tmux, Zsh, JetBrains Mono)",
+			description: "Устанавливает: git, base-devel, curl, wget, jq, ripgrep, htop, tmux, neovim, zsh и nerd-fonts-ttf.",
+			distros:     []string{"void"},
+			selected:    pick("void-dev-stack", false),
+			checkCmd:    []string{"which", "nvim"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "git", "base-devel", "curl", "wget", "jq", "ripgrep", "htop", "tmux", "neovim", "zsh", "nerd-fonts-ttf"},
 			},
 		},
 		{
@@ -803,8 +1032,44 @@ EOF`},
 				{"sudo", "usermod", "-aG", "docker", username},
 			},
 		},
+		{
+			id:          "void-docker",
+			category:    "dev",
+			title:       "Контейнеризация (Docker & Docker Compose + runit)",
+			description: "Устанавливает docker и docker-compose, включает сервис в /var/service/docker и добавляет в группу docker.",
+			distros:     []string{"void"},
+			selected:    pick("void-docker", false),
+			checkCmd:    []string{"test", "-L", "/var/service/docker"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "docker", "docker-compose"},
+				{"sudo", "ln", "-sf", "/etc/sv/docker", "/var/service/"},
+				{"sudo", "usermod", "-aG", "docker", username},
+			},
+		},
 
-		// ==================== ОКОННЫЕ МЕНЕДЖЕРЫ ====================
+		// ==================== ОКОННЫЕ МЕНЕДЖЕРЫ И DE ====================
+		{
+			id:          "void-de-xfce4",
+			category:    "wm",
+			title:       "Полный Xfce4 (Xarchiver, Thunar-плагины, Atril, Parole, DejaVu, GStreamer)",
+			description: "Ставит xorg, xfce4, xarchiver, thunar-archive-plugin, gvfs, atril (PDF), parole, mousepad, ristretto, dejavu-fonts-ttf и кодеки.",
+			distros:     []string{"void"},
+			selected:    pick("void-de-xfce4", false),
+			checkCmd:    []string{"which", "xfce4-session"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy",
+					"xorg-minimal", "xfce4", "xfce4-plugins", "dbus", "elogind", "polkit", "xfce-polkit",
+					"xarchiver", "thunar-archive-plugin", "thunar-volman", "gvfs", "gvfs-mtp", "gvfs-smb",
+					"unzip", "zip", "p7zip", "unrar", "tar", "xz",
+					"mousepad", "xfce4-terminal", "xfce4-screenshooter", "xfce4-taskmanager", "ristretto", "atril", "parole",
+					"gst-plugins-base", "gst-plugins-good", "gst-plugins-bad", "gst-plugins-ugly", "gst-libav",
+					"tumbler", "ffmpegthumbnailer",
+					"dejavu-fonts-ttf", "noto-fonts-ttf", "noto-fonts-cjk", "noto-fonts-emoji",
+					"xfce4-pulseaudio-plugin", "pavucontrol",
+				},
+				{"sudo", "ln", "-sf", "/etc/sv/dbus", "/var/service/"},
+			},
+		},
 		{
 			id:          "arch-wm-hyprland",
 			category:    "wm",
@@ -842,6 +1107,19 @@ EOF`},
 			},
 		},
 		{
+			id:          "void-wm-sway",
+			category:    "wm",
+			title:       "Стек Sway (современный Wayland-тайлинг + зависимости)",
+			description: "Устанавливает Sway, Waybar, Wofi, Swaybg, Swaylock, Swayidle, Foot, Kitty, Grim, Slurp, wl-clipboard, Mako, Polkit и порталы.",
+			distros:     []string{"void"},
+			selected:    pick("void-wm-sway", false),
+			checkCmd:    []string{"which", "sway"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "sway", "Waybar", "wofi", "swaybg", "swaylock", "swayidle", "foot", "kitty", "grim", "slurp", "wl-clipboard", "mako", "polkit-gnome", "xdg-desktop-portal-wlr", "xdg-desktop-portal-gtk", "font-awesome6", "dbus", "elogind"},
+				{"sudo", "ln", "-sf", "/etc/sv/dbus", "/var/service/"},
+			},
+		},
+		{
 			id:          "arch-wm-i3",
 			category:    "wm",
 			title:       "Стек i3-wm (классический тайлинг X11 + зависимости)",
@@ -863,6 +1141,19 @@ EOF`},
 			checkCmd:    []string{"which", "i3"},
 			commands: [][]string{
 				{"sudo", "apt", "install", "-y", "i3", "i3status", "i3lock", "polybar", "picom", "rofi", "feh", "dunst", "flameshot", "kitty", "xclip", "xorg"},
+			},
+		},
+		{
+			id:          "void-wm-i3",
+			category:    "wm",
+			title:       "Стек i3-wm (классический тайлинг X11 + зависимости)",
+			description: "Устанавливает i3, i3status, i3lock, picom, polybar, rofi, feh, dunst, flameshot, kitty, xclip и xorg-minimal.",
+			distros:     []string{"void"},
+			selected:    pick("void-wm-i3", false),
+			checkCmd:    []string{"which", "i3"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "i3", "i3status", "i3lock", "picom", "polybar", "rofi", "feh", "dunst", "flameshot", "kitty", "xclip", "xorg-minimal", "xinit", "dbus", "elogind"},
+				{"sudo", "ln", "-sf", "/etc/sv/dbus", "/var/service/"},
 			},
 		},
 		{
@@ -889,6 +1180,23 @@ EOF`},
 			commands: [][]string{
 				{"sudo", "apt", "install", "-y", "pipewire-audio", "wireplumber", "pipewire-pulse"},
 				{"systemctl", "--user", "enable", "--now", "pipewire", "pipewire-pulse", "wireplumber"},
+			},
+		},
+		{
+			id:          "void-pipewire",
+			category:    "wm",
+			title:       "Звуковой сервер PipeWire & WirePlumber (настройка для Void)",
+			description: "Устанавливает pipewire, wireplumber, alsa-pipewire и настраивает автозапуск через pipewire.conf.d и alsa/conf.d.",
+			distros:     []string{"void"},
+			selected:    pick("void-pipewire", false),
+			checkCmd:    []string{"test", "-L", "/etc/pipewire/pipewire.conf.d/10-wireplumber.conf"},
+			commands: [][]string{
+				{"sudo", "xbps-install", "-Sy", "pipewire", "wireplumber", "alsa-pipewire", "libjack-pipewire", "pavucontrol"},
+				{"sudo", "mkdir", "-p", "/etc/pipewire/pipewire.conf.d", "/etc/alsa/conf.d"},
+				{"sudo", "ln", "-sf", "/usr/share/examples/wireplumber/10-wireplumber.conf", "/etc/pipewire/pipewire.conf.d/"},
+				{"sudo", "ln", "-sf", "/usr/share/examples/pipewire/20-pipewire-pulse.conf", "/etc/pipewire/pipewire.conf.d/"},
+				{"sudo", "ln", "-sf", "/usr/share/alsa/alsa.conf.d/50-pipewire.conf", "/etc/alsa/conf.d/"},
+				{"sudo", "ln", "-sf", "/usr/share/alsa/alsa.conf.d/99-pipewire-default.conf", "/etc/alsa/conf.d/"},
 			},
 		},
 
@@ -920,6 +1228,9 @@ EOF`},
 
 	var filtered []tweak
 	for _, t := range rawTweaks {
+		if t.glibcOnly && distro.IsMusl {
+			continue
+		}
 		supported := false
 		for _, d := range t.distros {
 			if d == "all" || d == distro.ID {
@@ -950,7 +1261,7 @@ func initialModel() model {
 		{id: "kernel", label: "Сеть и Ядро"},
 		{id: "gaming", label: "Гейминг"},
 		{id: "dev", label: "Разработка"},
-		{id: "wm", label: "Оконные WM"},
+		{id: "wm", label: "WM и DE"},
 		{id: "tool", label: "Утилита"},
 	}
 
@@ -1042,27 +1353,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.presetMenu = false
 				}
 				return m, nil
-			case "1":
-				if len(m.presets) > 0 {
-					m.applyPreset(m.presets[0])
-					m.presetMenu = false
-				}
-				return m, nil
-			case "2":
-				if len(m.presets) > 1 {
-					m.applyPreset(m.presets[1])
-					m.presetMenu = false
-				}
-				return m, nil
-			case "3":
-				if len(m.presets) > 2 {
-					m.applyPreset(m.presets[2])
-					m.presetMenu = false
-				}
-				return m, nil
-			case "4":
-				if len(m.presets) > 3 {
-					m.applyPreset(m.presets[3])
+			case "1", "2", "3", "4", "5":
+				idx := int(msg.String()[0] - '1')
+				if idx >= 0 && idx < len(m.presets) {
+					m.applyPreset(m.presets[idx])
 					m.presetMenu = false
 				}
 				return m, nil
@@ -1076,21 +1370,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "p", "P":
 			m.presetMenu = true
 			return m, nil
-		case "1":
-			if len(m.presets) > 0 {
-				m.applyPreset(m.presets[0])
-			}
-		case "2":
-			if len(m.presets) > 1 {
-				m.applyPreset(m.presets[1])
-			}
-		case "3":
-			if len(m.presets) > 2 {
-				m.applyPreset(m.presets[2])
-			}
-		case "4":
-			if len(m.presets) > 3 {
-				m.applyPreset(m.presets[3])
+		case "1", "2", "3", "4", "5":
+			idx := int(msg.String()[0] - '1')
+			if idx >= 0 && idx < len(m.presets) {
+				m.applyPreset(m.presets[idx])
 			}
 		case "tab", "right", "l":
 			m.activeTab = (m.activeTab + 1) % len(m.tabs)
@@ -1143,7 +1426,7 @@ func (m model) viewPresetMenu() string {
 	}
 
 	b.WriteString(strings.Repeat("-", 75) + "\n")
-	b.WriteString("[↑/↓] Выбор стрелками  [Enter] Применить  [1-4] Быстрый выбор  [Esc / P] Отмена\n")
+	b.WriteString(fmt.Sprintf("[↑/↓] Выбор стрелками  [Enter] Применить  [1-%d] Быстрый выбор  [Esc / P] Отмена\n", len(m.presets)))
 	return b.String()
 }
 
@@ -1162,10 +1445,17 @@ func (m model) View() string {
 	if m.distro.Codename != "" {
 		distroLabel += fmt.Sprintf(" (%s)", m.distro.Codename)
 	}
+	if m.distro.ID == "void" {
+		if m.distro.IsMusl {
+			distroLabel += " [musl]"
+		} else {
+			distroLabel += " [glibc]"
+		}
+	}
 	b.WriteString(fmt.Sprintf("=== GNU-TWEAKER | ОС: %s ===\n\n", distroLabel))
 
-	if m.distro.ID != "arch" && m.distro.ID != "debian" {
-		b.WriteString("[!] Внимание: дистрибутив не распознан как Arch или Debian. Доступны только общие твики.\n\n")
+	if m.distro.ID != "arch" && m.distro.ID != "debian" && m.distro.ID != "void" {
+		b.WriteString("[!] Внимание: дистрибутив не распознан как Arch, Debian или Void. Доступны только общие твики.\n\n")
 	}
 
 	// Отрисовка вкладок
@@ -1176,7 +1466,7 @@ func (m model) View() string {
 			b.WriteString(fmt.Sprintf("  %s    ", tab.label))
 		}
 	}
-	b.WriteString("\n" + strings.Repeat("-", 78) + "\n\n")
+	b.WriteString("\n" + strings.Repeat("-", 82) + "\n\n")
 
 	// Статусное сообщение (если применен пресет)
 	if m.statusMsg != "" {
@@ -1206,7 +1496,7 @@ func (m model) View() string {
 	}
 
 	// Блок описания и превью команд выбранного твика
-	b.WriteString("\n" + strings.Repeat("-", 78) + "\n")
+	b.WriteString("\n" + strings.Repeat("-", 82) + "\n")
 	if len(m.visibleIdx) > 0 {
 		current := m.allTweaks[m.visibleIdx[m.cursor]]
 		b.WriteString(fmt.Sprintf("Описание: %s\n", current.description))
@@ -1219,7 +1509,7 @@ func (m model) View() string {
 		}
 	}
 
-	b.WriteString("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [1-4 / P] Пресеты  [A/N] Все/Снять  [I] Команды  [X] Запуск  [Q] Выход\n")
+	b.WriteString(fmt.Sprintf("\n[↑/↓] Навигация  [Tab/←/→] Вкладки  [Пробел] Выбор  [1-%d / P] Пресеты  [A/N] Все/Снять  [I] Команды  [X] Запуск  [Q] Выход\n", len(m.presets)))
 
 	return b.String()
 }
